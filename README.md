@@ -5,10 +5,10 @@ Mobile-first split-the-bill Web App MVP. The first version focuses on the shorte
 ## Features
 
 - Upload or capture receipt images with `accept="image/*"` and mobile camera capture.
-- Mock/local receipt provider that returns merchant, date, line items, quantity, unit price, tax, service fee, tip, and total.
+- Server-side OpenAI Vision receipt OCR that returns merchant, date, currency, line items, quantity, unit price, tax, service fee, tip, and total.
 - Paste-text parser for local development and demos.
-- Pluggable OCR surface in `lib/receipt.ts` so future providers can call OpenAI Vision or a dedicated receipt OCR API.
-- Auto item categorization into food, drink, transport, lodging, entertainment, shopping, and other.
+- Pluggable OCR surface in `app/api/receipt/route.ts` and `lib/receipt.ts` so future providers can swap in a dedicated receipt OCR API.
+- Auto item categorization into food, delivery, drink, transport, lodging, entertainment, shopping, and other.
 - Editable merchant, date, currency, total, charges, line item name, quantity, price, category, and participants.
 - Member naming, add/remove members, default equal split, item-level multi-person sharing, and opt-out per person.
 - Tax/service/tip allocation by consumption ratio or equal split.
@@ -35,6 +35,8 @@ npm run dev
 
 Open the local URL printed by the dev server.
 
+For real image OCR, set `OPENAI_API_KEY` in `.env.local`. If the key is missing or the OCR request fails, image upload shows an error and temporarily falls back to mock data so the rest of the UI remains testable.
+
 ## Scripts
 
 ```bash
@@ -47,12 +49,13 @@ npm run format   # oxfmt
 
 ## OCR Provider Plan
 
-Current development provider:
+Current image provider:
 
-- `mockReceiptProvider.parseImage(file, memberIds)` returns deterministic mock receipt data after image upload.
+- `app/api/receipt/route.ts` receives the uploaded image, keeps `OPENAI_API_KEY` server-only, sends the image to the OpenAI Responses API with structured JSON output, and normalizes the result into the app's `Receipt` shape.
 - `mockReceiptProvider.parseText(text, memberIds)` parses pasted receipt-like text locally.
+- `mockReceiptProvider.parseImage(file, memberIds)` is now only a development fallback when real OCR is unavailable.
 
-Recommended next provider interface:
+Provider interface:
 
 ```ts
 export type ReceiptProvider = {
@@ -62,7 +65,7 @@ export type ReceiptProvider = {
 };
 ```
 
-When adding OpenAI Vision later, create a server route such as `app/api/receipt/route.ts`, keep `OPENAI_API_KEY` server-only, and return the normalized `Receipt` shape. Do not expose provider secrets through `NEXT_PUBLIC_*`.
+Do not expose provider secrets through `NEXT_PUBLIC_*`.
 
 ## GitHub Setup
 

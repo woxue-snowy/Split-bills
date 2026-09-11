@@ -1,5 +1,6 @@
 export const categoryOptions = [
   { value: 'food', label: '餐饮' },
+  { value: 'delivery', label: '配送' },
   { value: 'drink', label: '饮料' },
   { value: 'transport', label: '交通' },
   { value: 'lodging', label: '住宿' },
@@ -38,6 +39,7 @@ export type ReceiptProvider = {
 };
 
 const keywordCategories: Array<[Category, string[]]> = [
+  ['delivery', ['delivery', 'deliveroo', 'uber eats', 'doordash', 'courier', 'shipping', '外卖', '配送', '运费']],
   ['drink', ['coffee', 'tea', 'beer', 'wine', 'juice', 'latte', 'mocha', '可乐', '咖啡', '茶', '酒', '饮料']],
   ['transport', ['taxi', 'uber', 'lyft', 'train', 'bus', 'metro', 'parking', '地铁', '公交', '打车', '停车']],
   ['lodging', ['hotel', 'inn', 'airbnb', 'room', '住宿', '酒店', '民宿', '房费']],
@@ -168,6 +170,31 @@ export function parseReceiptText(text: string, memberIds: string[]): Receipt {
   });
 }
 
+export function normalizeReceiptCandidate(candidate: unknown, memberIds: string[]): Receipt {
+  const source = isRecord(candidate) ? candidate : {};
+  const rawItems = Array.isArray(source.items) ? source.items : [];
+  const items = rawItems
+    .map((item) => normalizeItem(item, memberIds))
+    .filter((item): item is ReceiptItem => item !== null);
+  const safeItems = items.length > 0 ? items : [createReceiptItem('Unrecognized item', 1, 0, memberIds)];
+  const tax = toMoney(source.tax);
+  const serviceFee = toMoney(source.serviceFee);
+  const tip = toMoney(source.tip);
+  const subtotal = safeItems.reduce((sum, item) => sum + item.total, 0);
+  const total = toMoney(source.total) || subtotal + tax + serviceFee + tip;
+
+  return finishReceipt({
+    merchant: cleanText(source.merchant, 'Scanned Receipt'),
+    date: normalizeDate(source.date),
+    currency: normalizeCurrency(source.currency),
+    items: safeItems,
+    tax,
+    serviceFee,
+    tip,
+    total,
+  });
+}
+
 export const mockReceiptProvider: ReceiptProvider = {
   name: 'Mock/local parser',
   async parseImage(file, memberIds) {
@@ -224,6 +251,73 @@ function extractLastAmount(line: string): number | null {
 
 function looksLikeMoneyLine(line: string) {
   return extractLastAmount(line) !== null;
+}
+
+function normalizeItem(item: unknown, memberIds: string[]): ReceiptItem | null {
+  if (!isRecord(item)) return null;
+  const name = cleanText(item.name, '').trim();
+  if (!name) return null;
+  const quantity = positiveNumber(item.quantity, 1);
+  const explicitTotal = toMoney(item.total);
+  const unitPrice = positiveNumber(
+    item.unitPrice,
+    explicitTotal > 0 ? explicitTotal / Math.max(quantity, 1) : 0,
+  );
+  const total = explicitTotal || roundMoney(quantity * unitPrice);
+  const category = normalizeCategory(item.category, name);
+
+  return {
+    id: crypto.randomUUID(),
+    name,
+    quantity,
+    unitPrice: roundMoney(unitPrice),
+    total: roundMoney(total),
+    category,
+    assignedTo: [...memberIds],
+  };
+}
+
+function normalizeCategory(value: unknown, fallbackName: string): Category {
+  if (typeof value === 'string' && isCategory(value)) return value;
+  return categorizeItem([fallbackName, typeof value === 'string' ? value : ''].join(' '));
+}
+
+function isCategory(value: string): value is Category {
+  return categoryOptions.some((category) => category.value === value);
+}
+
+function cleanText(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function normalizeDate(value: unknown): string {
+  if (typeof value === 'string') {
+    const match = value.match(/\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b/);
+    if (match) return match[0].replaceAll('/', '-');
+  }
+  return new Date().toISOString().slice(0, 10);
+}
+
+function normalizeCurrency(value: unknown): string {
+  const clean = cleanText(value, '$');
+  if (/gbp|pound/i.test(clean)) return '£';
+  if (/eur|euro/i.test(clean)) return '€';
+  if (/jpy|cny|rmb|yuan|yen/i.test(clean)) return clean.toLowerCase().includes('jp') ? '¥' : '¥';
+  return clean.slice(0, 4);
+}
+
+function positiveNumber(value: unknown, fallback: number): number {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function toMoney(value: unknown): number {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+  return Number.isFinite(parsed) ? roundMoney(parsed) : 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 export function roundMoney(value: number): number {

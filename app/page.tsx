@@ -68,6 +68,7 @@ export default function Home() {
   const [uploadedName, setUploadedName] = useState('mock receipt ready');
   const [previewUrl, setPreviewUrl] = useState('');
   const [isParsing, setIsParsing] = useState(false);
+  const [parseError, setParseError] = useState('');
   const [copied, setCopied] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -140,16 +141,26 @@ export default function Home() {
   async function handleFile(file?: File) {
     if (!file) return;
     setIsParsing(true);
+    setParseError('');
     setUploadedName(file.name);
     setPreviewUrl(URL.createObjectURL(file));
 
-    const parsed = await mockReceiptProvider.parseImage(file, memberIds);
-    setReceipt(syncAssignments(parsed, memberIds));
-    setIsParsing(false);
+    try {
+      const parsed = await parseReceiptImage(file, memberIds);
+      setReceipt(syncAssignments(parsed, memberIds));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '图片识别失败';
+      setParseError(`${message} 已临时回退到 mock 数据。`);
+      const parsed = await mockReceiptProvider.parseImage(file, memberIds);
+      setReceipt(syncAssignments(parsed, memberIds));
+    } finally {
+      setIsParsing(false);
+    }
   }
 
   async function handleTextParse() {
     setIsParsing(true);
+    setParseError('');
     const parsed = await mockReceiptProvider.parseText(rawText, memberIds);
     setReceipt(syncAssignments(parsed, memberIds));
     setUploadedName('pasted text');
@@ -274,7 +285,7 @@ export default function Home() {
           </div>
           <div className="hidden items-center gap-2 text-sm text-[#697064] sm:flex">
             <Sparkles className="size-4 text-[#c26d3d]" />
-            {mockReceiptProvider.name}
+            OpenAI Vision OCR + local text parser
           </div>
         </header>
 
@@ -285,7 +296,7 @@ export default function Home() {
                 <div>
                   <h2 className="text-lg font-semibold">账单来源</h2>
                   <p className="text-sm text-[#697064]">
-                    上传或拍摄后先用 mock OCR 填充，可随时手动修正。
+                    上传或拍摄后由服务端 AI 识别，可随时手动修正。
                   </p>
                 </div>
                 {isParsing ? (
@@ -309,7 +320,7 @@ export default function Home() {
                     <div>
                       <p className="font-medium">选择图片或打开相机</p>
                       <p className="mt-1 text-sm text-[#697064]">
-                        支持小票、账单截图、菜单结账页。当前为 mock provider。
+                        支持小票、账单截图、菜单结账页。API key 只在服务端使用。
                       </p>
                     </div>
                   </div>
@@ -349,6 +360,12 @@ export default function Home() {
                   className="mt-3 h-48 w-full rounded-lg border border-[#e4d7c7] bg-cover bg-center"
                   style={{ backgroundImage: `url(${previewUrl})` }}
                 />
+              ) : null}
+
+              {parseError ? (
+                <p className="mt-3 rounded-md border border-[#e7c5b4] bg-[#fff1e8] px-3 py-2 text-sm text-[#8c3f2d]">
+                  {parseError}
+                </p>
               ) : null}
 
               <Textarea
@@ -660,6 +677,41 @@ function Line({ label, value }: { label: string; value: string }) {
 function parseMoney(value: string) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function parseReceiptImage(file: File, memberIds: string[]): Promise<Receipt> {
+  const formData = new FormData();
+  formData.append('image', file);
+  formData.append('memberIds', JSON.stringify(memberIds));
+
+  const response = await fetch('/api/receipt', {
+    method: 'POST',
+    body: formData,
+  });
+  const payload = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const message =
+      typeof payload === 'object' &&
+      payload !== null &&
+      'error' in payload &&
+      typeof payload.error === 'string'
+        ? payload.error
+        : 'AI 图片识别失败';
+    throw new Error(message);
+  }
+
+  if (
+    typeof payload === 'object' &&
+    payload !== null &&
+    'receipt' in payload &&
+    typeof payload.receipt === 'object' &&
+    payload.receipt !== null
+  ) {
+    return payload.receipt as Receipt;
+  }
+
+  throw new Error('AI 返回的数据格式不正确');
 }
 
 function syncAssignments(receipt: Receipt, memberIds: string[]) {

@@ -91,7 +91,7 @@ export default function Home() {
   const [providerName, setProviderName] = useState('server route (mock fallback)');
   const [parseError, setParseError] = useState('');
   const [copied, setCopied] = useState(false);
-  const [history, setHistory] = useState<ReceiptHistoryEntry[]>([]);
+  const [history, setHistory] = useState<ReceiptHistoryEntry[]>(readHistoryFromLocalStorage);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isMobile = useIsMobile();
 
@@ -104,19 +104,6 @@ export default function Home() {
     () => formatSettlement(summary, receipt.currency),
     [receipt.currency, summary],
   );
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try {
-      const raw = window.localStorage.getItem(historyStorageKey);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return;
-      setHistory(parsed.filter(isHistoryEntry).slice(0, maxHistoryEntries));
-    } catch {
-      setHistory([]);
-    }
-  }, []);
 
   function persistHistory(nextHistory: ReceiptHistoryEntry[]) {
     setHistory(nextHistory);
@@ -875,6 +862,19 @@ function syncAssignments(receipt: Receipt, memberIds: string[]) {
         : memberIds,
     })),
   };
+}
+
+function readHistoryFromLocalStorage(): ReceiptHistoryEntry[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(historyStorageKey);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isHistoryEntry).slice(0, maxHistoryEntries);
+  } catch {
+    return [];
+  }
 }
 
 function isHistoryEntry(value: unknown): value is ReceiptHistoryEntry {

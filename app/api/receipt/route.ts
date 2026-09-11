@@ -86,7 +86,9 @@ function parseMemberIds(raw: FormDataEntryValue | null): string[] {
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((value): value is string => typeof value === 'string' && value.trim());
+    return parsed.filter(
+      (value): value is string => typeof value === 'string' && value.trim().length > 0,
+    );
   } catch {
     return [];
   }

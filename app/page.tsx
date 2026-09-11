@@ -36,10 +36,15 @@ import {
 } from '@/lib/receipt';
 import {
   computeSplit,
+  createSinglePayerBalances,
   formatSettlement,
   money,
+  simplifyDebts,
+  validateItemSplit,
   type FeeAllocationMode,
+  type ItemSplitRules,
   type Member,
+  type SplitMode,
 } from '@/lib/split';
 
 const initialMembers: Member[] = [
@@ -64,6 +69,8 @@ export default function Home() {
     createEmptyReceipt(initialMembers.map((member) => member.id)),
   );
   const [feeMode, setFeeMode] = useState<FeeAllocationMode>('proportional');
+  const [splitRules, setSplitRules] = useState<ItemSplitRules>({});
+  const [paidByMemberId, setPaidByMemberId] = useState(initialMembers[0].id);
   const [rawText, setRawText] = useState(sampleText);
   const [uploadedName, setUploadedName] = useState('mock receipt ready');
   const [previewUrl, setPreviewUrl] = useState('');
@@ -74,13 +81,26 @@ export default function Home() {
 
   const memberIds = members.map((member) => member.id);
   const summary = useMemo(
-    () => computeSplit(receipt, members, feeMode),
-    [feeMode, members, receipt],
+    () => computeSplit(receipt, members, feeMode, splitRules),
+    [feeMode, members, receipt, splitRules],
   );
-  const settlement = useMemo(
-    () => formatSettlement(summary, receipt.currency),
-    [receipt.currency, summary],
+  const transfers = useMemo(
+    () => simplifyDebts(createSinglePayerBalances(summary, paidByMemberId)),
+    [paidByMemberId, summary],
   );
+  const settlement = useMemo(() => {
+    const base = formatSettlement(summary, receipt.currency);
+    if (transfers.length === 0) return base;
+    return [
+      base,
+      '',
+      '最简转账',
+      ...transfers.map(
+        (transfer) =>
+          `${transfer.fromName} → ${transfer.toName}: ${money(transfer.amount, receipt.currency)}`,
+      ),
+    ].join('\n');
+  }, [receipt.currency, summary, transfers]);
 
   useEffect(() => {
     const context = document.modelContext;
@@ -221,6 +241,9 @@ export default function Home() {
     const remaining = members.filter((member) => member.id !== memberId);
     const remainingIds = remaining.map((member) => member.id);
     setMembers(remaining);
+    if (paidByMemberId === memberId) {
+      setPaidByMemberId(remaining[0]?.id ?? '');
+    }
     setReceipt((current) => ({
       ...current,
       items: current.items.map((item) => {
@@ -250,6 +273,34 @@ export default function Home() {
         return { ...item, assignedTo: next };
       }),
     }));
+  }
+
+  function setItemSplitMode(itemId: string, mode: SplitMode) {
+    const item = receipt.items.find((candidate) => candidate.id === itemId);
+    if (!item) return;
+    setSplitRules((current) => ({
+      ...current,
+      [itemId]: {
+        mode,
+        values: createDefaultSplitValues(mode, item.total, item.assignedTo),
+      },
+    }));
+  }
+
+  function setItemSplitValue(itemId: string, memberId: string, value: string) {
+    setSplitRules((current) => {
+      const rule = current[itemId] ?? { mode: 'equal' as const };
+      return {
+        ...current,
+        [itemId]: {
+          ...rule,
+          values: {
+            ...rule.values,
+            [memberId]: Math.max(0, parseMoney(value)),
+          },
+        },
+      };
+    });
   }
 
   async function copySettlement() {
@@ -471,28 +522,70 @@ export default function Home() {
                         <Trash2 className="size-4" />
                       </Button>
                     </div>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {members.map((member) => {
-                        const checked = item.assignedTo.includes(member.id);
-                        return (
-                          <label
-                            key={member.id}
-                            className="flex h-9 items-center gap-2 rounded-lg border border-[#dfd2c2] bg-[#fffaf3] px-2.5 text-sm"
-                          >
-                            <Checkbox
-                              checked={checked}
-                              onCheckedChange={(value) =>
-                                toggleAssignee(item.id, member.id, Boolean(value))
-                              }
-                            />
-                            {member.name || '未命名'}
-                          </label>
-                        );
-                      })}
-                      <span className="ml-auto self-center text-sm font-medium text-[#5d654f]">
-                        {money(item.total, receipt.currency)}
-                      </span>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-[150px_1fr]">
+                      <NativeSelect
+                        value={splitRules[item.id]?.mode ?? 'equal'}
+                        onChange={(event) =>
+                          setItemSplitMode(item.id, event.target.value as SplitMode)
+                        }
+                        aria-label={`${item.name} 分账方式`}
+                        className="w-full"
+                      >
+                        <option value="equal">均摊 Equal</option>
+                        <option value="percentage">比例 Percentage</option>
+                        <option value="exact">固定金额 Exact</option>
+                        <option value="shares">份额 Shares</option>
+                      </NativeSelect>
+                      <div className="flex flex-wrap gap-2">
+                        {members.map((member) => {
+                          const checked = item.assignedTo.includes(member.id);
+                          const mode = splitRules[item.id]?.mode ?? 'equal';
+                          return (
+                            <label
+                              key={member.id}
+                              className="flex min-h-9 items-center gap-2 rounded-lg border border-[#dfd2c2] bg-[#fffaf3] px-2.5 text-sm"
+                            >
+                              <Checkbox
+                                checked={checked}
+                                onCheckedChange={(value) =>
+                                  toggleAssignee(item.id, member.id, Boolean(value))
+                                }
+                              />
+                              <span>{member.name || '未命名'}</span>
+                              {checked && mode !== 'equal' ? (
+                                <Input
+                                  type="number"
+                                  min="0"
+                                  step={mode === 'shares' ? '1' : '0.01'}
+                                  value={splitRules[item.id]?.values?.[member.id] ?? ''}
+                                  onChange={(event) =>
+                                    setItemSplitValue(item.id, member.id, event.target.value)
+                                  }
+                                  aria-label={`${member.name} ${mode}`}
+                                  className="h-7 w-20 border-[#d8c8b7] bg-white px-2"
+                                />
+                              ) : null}
+                            </label>
+                          );
+                        })}
+                        <span className="ml-auto self-center text-sm font-medium text-[#5d654f]">
+                          {money(item.total, receipt.currency)}
+                        </span>
+                      </div>
                     </div>
+                    {validateItemSplit(
+                      item.total,
+                      item.assignedTo,
+                      splitRules[item.id] ?? { mode: 'equal' },
+                    ) ? (
+                      <p className="mt-2 text-sm text-[#a04b32]">
+                        {validateItemSplit(
+                          item.total,
+                          item.assignedTo,
+                          splitRules[item.id] ?? { mode: 'equal' },
+                        )}
+                      </p>
+                    ) : null}
                   </article>
                 ))}
               </div>
@@ -536,6 +629,20 @@ export default function Home() {
                   </div>
                 ))}
               </div>
+              <label className="mt-3 block text-sm font-medium text-[#4d5546]">
+                本单付款人
+                <NativeSelect
+                  value={paidByMemberId}
+                  onChange={(event) => setPaidByMemberId(event.target.value)}
+                  className="mt-1 w-full"
+                >
+                  {members.map((member) => (
+                    <option key={member.id} value={member.id}>
+                      {member.name || '未命名'}
+                    </option>
+                  ))}
+                </NativeSelect>
+              </label>
             </section>
 
             <section className="rounded-lg border border-[#ded2c3] bg-[#fffdf9] p-4 shadow-sm">
@@ -617,6 +724,25 @@ export default function Home() {
                 ))}
               </div>
 
+              {transfers.length > 0 ? (
+                <div className="mt-4 rounded-lg border border-white/12 bg-white/[0.08] p-3">
+                  <p className="mb-2 text-sm font-semibold text-white">最简转账</p>
+                  <div className="space-y-1 text-sm text-[#d7dec8]">
+                    {transfers.map((transfer, index) => (
+                      <div
+                        key={`${transfer.fromMemberId}-${transfer.toMemberId}-${index}`}
+                        className="flex items-center justify-between gap-3"
+                      >
+                        <span>
+                          {transfer.fromName} → {transfer.toName}
+                        </span>
+                        <span>{money(transfer.amount, receipt.currency)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
               <div className="mt-4 grid grid-cols-2 gap-2">
                 <Button className="h-10 bg-white text-[#253026] hover:bg-[#edf0df]" onClick={copySettlement}>
                   {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
@@ -671,6 +797,32 @@ function Line({ label, value }: { label: string; value: string }) {
       <span>{label}</span>
       <span>{value}</span>
     </div>
+  );
+}
+
+function createDefaultSplitValues(
+  mode: SplitMode,
+  total: number,
+  participantIds: string[],
+): Record<string, number> | undefined {
+  if (mode === 'equal') return undefined;
+  const ids = participantIds.length > 0 ? participantIds : [];
+  if (ids.length === 0) return {};
+
+  if (mode === 'shares') {
+    return Object.fromEntries(ids.map((id) => [id, 1]));
+  }
+
+  const target = mode === 'percentage' ? 100 : total;
+  const centsOrBasisPoints = Math.round(target * 100);
+  const base = Math.floor(centsOrBasisPoints / ids.length);
+  let remainder = centsOrBasisPoints - base * ids.length;
+
+  return Object.fromEntries(
+    ids.map((id) => {
+      const value = base + (remainder-- > 0 ? 1 : 0);
+      return [id, value / 100];
+    }),
   );
 }
 

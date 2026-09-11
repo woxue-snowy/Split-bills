@@ -2,16 +2,19 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertCircle,
   Camera,
   Check,
   CircleDollarSign,
   Copy,
   Download,
+  History,
   Minus,
   PencilLine,
   Plus,
   ReceiptText,
   RefreshCw,
+  Save,
   Sparkles,
   Trash2,
   Upload,
@@ -28,7 +31,6 @@ import {
   categoryOptions,
   createEmptyReceipt,
   createReceiptItem,
-  mockReceiptProvider,
   type Category,
   type Receipt,
   type ReceiptItem,
@@ -41,6 +43,7 @@ import {
   type FeeAllocationMode,
   type Member,
 } from '@/lib/split';
+import { useIsMobile } from '@/hooks/use-mobile';
 
 const initialMembers: Member[] = [
   { id: 'member-1', name: 'Alex' },
@@ -55,8 +58,25 @@ Iced tea x3 12.75
 Movie ticket x1 18.00
 Tax 4.45
 Service fee 3.00
-Tip 8.00
+Tip 0.00
 Total 75.20`;
+
+const historyStorageKey = 'splitsnap.receipt-history.v1';
+const maxHistoryEntries = 12;
+
+type ReceiptHistoryEntry = {
+  id: string;
+  createdAt: string;
+  source: string;
+  receipt: Receipt;
+  members: Member[];
+  feeMode: FeeAllocationMode;
+};
+
+type ParseResult = {
+  provider: string;
+  receipt: Receipt;
+};
 
 export default function Home() {
   const [members, setMembers] = useState<Member[]>(initialMembers);
@@ -65,11 +85,15 @@ export default function Home() {
   );
   const [feeMode, setFeeMode] = useState<FeeAllocationMode>('proportional');
   const [rawText, setRawText] = useState(sampleText);
-  const [uploadedName, setUploadedName] = useState('mock receipt ready');
+  const [uploadedName, setUploadedName] = useState('ready');
   const [previewUrl, setPreviewUrl] = useState('');
   const [isParsing, setIsParsing] = useState(false);
+  const [providerName, setProviderName] = useState('server route (mock fallback)');
+  const [parseError, setParseError] = useState('');
   const [copied, setCopied] = useState(false);
+  const [history, setHistory] = useState<ReceiptHistoryEntry[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const isMobile = useIsMobile();
 
   const memberIds = members.map((member) => member.id);
   const summary = useMemo(
@@ -80,6 +104,65 @@ export default function Home() {
     () => formatSettlement(summary, receipt.currency),
     [receipt.currency, summary],
   );
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const raw = window.localStorage.getItem(historyStorageKey);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      setHistory(parsed.filter(isHistoryEntry).slice(0, maxHistoryEntries));
+    } catch {
+      setHistory([]);
+    }
+  }, []);
+
+  function persistHistory(nextHistory: ReceiptHistoryEntry[]) {
+    setHistory(nextHistory);
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(historyStorageKey, JSON.stringify(nextHistory));
+  }
+
+  function saveHistory(source: string, nextReceipt: Receipt, nextMembers: Member[], nextFeeMode: FeeAllocationMode) {
+    const entry: ReceiptHistoryEntry = {
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      source,
+      receipt: nextReceipt,
+      members: nextMembers,
+      feeMode: nextFeeMode,
+    };
+    setHistory((current) => {
+      const nextHistory = [entry, ...current].slice(0, maxHistoryEntries);
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(historyStorageKey, JSON.stringify(nextHistory));
+      }
+      return nextHistory;
+    });
+  }
+
+  function restoreHistory(entry: ReceiptHistoryEntry) {
+    setReceipt(syncAssignments(entry.receipt, entry.members.map((member) => member.id)));
+    setMembers(entry.members);
+    setFeeMode(entry.feeMode);
+    setUploadedName(`${entry.source} · ${new Date(entry.createdAt).toLocaleString()}`);
+    setParseError('');
+  }
+
+  function removeHistoryEntry(id: string) {
+    setHistory((current) => {
+      const nextHistory = current.filter((entry) => entry.id !== id);
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(historyStorageKey, JSON.stringify(nextHistory));
+      }
+      return nextHistory;
+    });
+  }
+
+  function clearHistory() {
+    persistHistory([]);
+  }
 
   useEffect(() => {
     const context = document.modelContext;
@@ -140,20 +223,38 @@ export default function Home() {
   async function handleFile(file?: File) {
     if (!file) return;
     setIsParsing(true);
+    setParseError('');
     setUploadedName(file.name);
     setPreviewUrl(URL.createObjectURL(file));
 
-    const parsed = await mockReceiptProvider.parseImage(file, memberIds);
-    setReceipt(syncAssignments(parsed, memberIds));
-    setIsParsing(false);
+    try {
+      const result = await parseReceiptViaServer({ file, memberIds });
+      const synced = syncAssignments(result.receipt, memberIds);
+      setReceipt(synced);
+      setProviderName(result.provider);
+      saveHistory(`图片识别 · ${file.name}`, synced, members, feeMode);
+    } catch {
+      setParseError('识别失败，请稍后重试或改用文本解析。');
+    } finally {
+      setIsParsing(false);
+    }
   }
 
   async function handleTextParse() {
     setIsParsing(true);
-    const parsed = await mockReceiptProvider.parseText(rawText, memberIds);
-    setReceipt(syncAssignments(parsed, memberIds));
-    setUploadedName('pasted text');
-    setIsParsing(false);
+    setParseError('');
+    try {
+      const result = await parseReceiptViaServer({ text: rawText, memberIds });
+      const synced = syncAssignments(result.receipt, memberIds);
+      setReceipt(synced);
+      setProviderName(result.provider);
+      setUploadedName('pasted text');
+      saveHistory('文本解析', synced, members, feeMode);
+    } catch {
+      setParseError('解析失败，请检查文本格式后重试。');
+    } finally {
+      setIsParsing(false);
+    }
   }
 
   function updateReceiptField<K extends keyof Receipt>(key: K, value: Receipt[K]) {
@@ -257,24 +358,50 @@ export default function Home() {
     URL.revokeObjectURL(url);
   }
 
+  async function parseReceiptViaServer({
+    file,
+    text,
+    memberIds: currentMemberIds,
+  }: {
+    file?: File;
+    text?: string;
+    memberIds: string[];
+  }): Promise<ParseResult> {
+    const formData = new FormData();
+    formData.set('memberIds', JSON.stringify(currentMemberIds));
+    if (file) formData.set('file', file);
+    if (text) formData.set('text', text);
+
+    const response = await fetch('/api/receipt', {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      throw new Error('parse failed');
+    }
+
+    return (await response.json()) as ParseResult;
+  }
+
   return (
     <main className="min-h-screen bg-[#f7f3ec] text-[#202124]">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-4 sm:px-6 lg:px-8">
-        <header className="flex items-center justify-between gap-4 rounded-lg border border-[#ded2c3] bg-[#fffdf9]/90 px-4 py-3 shadow-sm">
+      <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 px-3 py-3 sm:gap-5 sm:px-6 sm:py-4 lg:px-8">
+        <header className="flex flex-col gap-3 rounded-lg border border-[#ded2c3] bg-[#fffdf9]/90 px-3 py-3 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:px-4">
           <div className="flex items-center gap-3">
-            <span className="flex size-10 items-center justify-center rounded-lg bg-[#253026] text-white">
+            <span className="flex size-9 items-center justify-center rounded-lg bg-[#253026] text-white sm:size-10">
               <ReceiptText className="size-5" />
             </span>
             <div>
               <p className="text-sm font-semibold text-[#5f674f]">SplitSnap MVP</p>
-              <h1 className="text-xl font-semibold tracking-normal sm:text-2xl">
+              <h1 className="text-lg font-semibold tracking-normal sm:text-2xl">
                 拍账单，少点几下分完
               </h1>
             </div>
           </div>
-          <div className="hidden items-center gap-2 text-sm text-[#697064] sm:flex">
+          <div className="inline-flex items-center gap-2 text-sm text-[#697064]">
             <Sparkles className="size-4 text-[#c26d3d]" />
-            {mockReceiptProvider.name}
+            {providerName}
           </div>
         </header>
 
@@ -285,7 +412,7 @@ export default function Home() {
                 <div>
                   <h2 className="text-lg font-semibold">账单来源</h2>
                   <p className="text-sm text-[#697064]">
-                    上传或拍摄后先用 mock OCR 填充，可随时手动修正。
+                    上传或拍摄会调用服务端 OCR route（当前含 mock 回退），可随时手动修正。
                   </p>
                 </div>
                 {isParsing ? (
@@ -299,7 +426,7 @@ export default function Home() {
               <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
                 <button
                   type="button"
-                  className="min-h-36 rounded-lg border border-dashed border-[#b7aa98] bg-[#faf4e9] px-4 py-5 text-left transition hover:border-[#7d6f5c] hover:bg-[#f6ead8]"
+                  className="min-h-32 rounded-lg border border-dashed border-[#b7aa98] bg-[#faf4e9] px-4 py-4 text-left transition hover:border-[#7d6f5c] hover:bg-[#f6ead8] sm:min-h-36 sm:py-5"
                   onClick={() => fileInputRef.current?.click()}
                 >
                   <div className="flex items-center gap-3">
@@ -309,7 +436,7 @@ export default function Home() {
                     <div>
                       <p className="font-medium">选择图片或打开相机</p>
                       <p className="mt-1 text-sm text-[#697064]">
-                        支持小票、账单截图、菜单结账页。当前为 mock provider。
+                        支持小票、账单截图、菜单结账页，优先走服务端 OCR。
                       </p>
                     </div>
                   </div>
@@ -324,16 +451,16 @@ export default function Home() {
                   />
                 </button>
 
-                <div className="flex gap-2 sm:flex-col">
+                <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-col">
                   <Button
-                    className="h-11 flex-1 bg-[#253026] px-4 text-white hover:bg-[#394535] sm:flex-none"
+                    className="h-11 bg-[#253026] px-4 text-white hover:bg-[#394535] sm:flex-none"
                     onClick={() => fileInputRef.current?.click()}
                   >
                     <Camera className="size-4" />
                     拍摄
                   </Button>
                   <Button
-                    className="h-11 flex-1 border-[#c9baa7] bg-white px-4 text-[#30352e] hover:bg-[#f8f0e5] sm:flex-none"
+                    className="h-11 border-[#c9baa7] bg-white px-4 text-[#30352e] hover:bg-[#f8f0e5] sm:flex-none"
                     variant="outline"
                     onClick={handleTextParse}
                   >
@@ -351,6 +478,13 @@ export default function Home() {
                 />
               ) : null}
 
+              {parseError ? (
+                <p className="mt-3 inline-flex items-center gap-2 rounded-md border border-[#e7b3a5] bg-[#fde9e4] px-2.5 py-2 text-sm text-[#8d3e2e]">
+                  <AlertCircle className="size-4" />
+                  {parseError}
+                </p>
+              ) : null}
+
               <Textarea
                 className="mt-3 min-h-28 border-[#d8c8b7] bg-white text-sm"
                 value={rawText}
@@ -360,6 +494,18 @@ export default function Home() {
             </section>
 
             <section className="rounded-lg border border-[#ded2c3] bg-[#fffdf9] p-4 shadow-sm">
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <h2 className="text-base font-semibold">账单信息</h2>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 border-[#c9baa7] bg-white text-xs"
+                  onClick={() => saveHistory('手动快照', receipt, members, feeMode)}
+                >
+                  <Save className="size-3.5" />
+                  保存快照
+                </Button>
+              </div>
               <div className="grid gap-3 sm:grid-cols-4">
                 <LabeledInput
                   label="商家"
@@ -522,6 +668,63 @@ export default function Home() {
             </section>
 
             <section className="rounded-lg border border-[#ded2c3] bg-[#fffdf9] p-4 shadow-sm">
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <History className="size-5 text-[#5d654f]" />
+                  <h2 className="text-lg font-semibold">历史账单</h2>
+                </div>
+                {history.length > 0 ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 px-2 text-[#8c3f2d] hover:bg-[#f7e5dd]"
+                    onClick={clearHistory}
+                  >
+                    清空
+                  </Button>
+                ) : null}
+              </div>
+              {history.length === 0 ? (
+                <p className="text-sm text-[#697064]">还没有历史记录，识别后会自动保存到本地。</p>
+              ) : (
+                <div className="space-y-2">
+                  {history.map((entry) => (
+                    <article
+                      key={entry.id}
+                      className="rounded-lg border border-[#e2d5c5] bg-white p-2.5"
+                    >
+                      <button
+                        type="button"
+                        className="w-full text-left"
+                        onClick={() => restoreHistory(entry)}
+                      >
+                        <p className="truncate text-sm font-medium text-[#2f342d]">
+                          {entry.receipt.merchant || '未命名账单'}
+                        </p>
+                        <p className="mt-1 text-xs text-[#697064]">
+                          {money(entry.receipt.total, entry.receipt.currency)} · {entry.source}
+                        </p>
+                        <p className="mt-1 text-xs text-[#697064]">
+                          {new Date(entry.createdAt).toLocaleString()}
+                        </p>
+                      </button>
+                      <div className="mt-2 flex items-center justify-end">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 px-2 text-[#8c3f2d] hover:bg-[#f7e5dd]"
+                          onClick={() => removeHistoryEntry(entry.id)}
+                        >
+                          删除
+                        </Button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="rounded-lg border border-[#ded2c3] bg-[#fffdf9] p-4 shadow-sm">
               <div className="mb-3 flex items-center gap-2">
                 <CircleDollarSign className="size-5 text-[#c26d3d]" />
                 <h2 className="text-lg font-semibold">费用分摊</h2>
@@ -579,7 +782,7 @@ export default function Home() {
                   <details
                     key={person.memberId}
                     className="rounded-lg border border-white/12 bg-white/[0.06] p-3"
-                    open
+                    open={!isMobile}
                   >
                     <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
                       <span className="font-medium">{person.name || '未命名'}</span>
@@ -600,7 +803,7 @@ export default function Home() {
                 ))}
               </div>
 
-              <div className="mt-4 grid grid-cols-2 gap-2">
+              <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
                 <Button className="h-10 bg-white text-[#253026] hover:bg-[#edf0df]" onClick={copySettlement}>
                   {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
                   {copied ? '已复制' : '复制'}
@@ -672,6 +875,19 @@ function syncAssignments(receipt: Receipt, memberIds: string[]) {
         : memberIds,
     })),
   };
+}
+
+function isHistoryEntry(value: unknown): value is ReceiptHistoryEntry {
+  if (!value || typeof value !== 'object') return false;
+  const entry = value as Partial<ReceiptHistoryEntry>;
+  return (
+    typeof entry.id === 'string' &&
+    typeof entry.createdAt === 'string' &&
+    typeof entry.source === 'string' &&
+    !!entry.receipt &&
+    Array.isArray(entry.members) &&
+    (entry.feeMode === 'proportional' || entry.feeMode === 'even')
+  );
 }
 
 declare global {

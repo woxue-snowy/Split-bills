@@ -7,6 +7,7 @@ Mobile-first split-the-bill Web App MVP. The first version focuses on the shorte
 - Upload or capture receipt images with `accept="image/*"` and mobile camera capture.
 - Mock/local receipt provider that returns merchant, date, line items, quantity, unit price, tax, service fee, tip, and total.
 - Paste-text parser for local development and demos.
+- Server-side OCR route placeholder at `app/api/receipt/route.ts` with secure provider-key boundary and mock fallback.
 - Pluggable OCR surface in `lib/receipt.ts` so future providers can call OpenAI Vision or a dedicated receipt OCR API.
 - Auto item categorization into food, drink, transport, lodging, entertainment, shopping, and other.
 - Editable merchant, date, currency, total, charges, line item name, quantity, price, category, and participants.
@@ -14,6 +15,7 @@ Mobile-first split-the-bill Web App MVP. The first version focuses on the shorte
 - Tax/service/tip allocation by consumption ratio or equal split.
 - Per-person totals with calculation details.
 - Copy and text-file export for settlement results.
+- Receipt history with localStorage persistence and one-tap restore.
 
 ## Tech Stack
 
@@ -62,7 +64,7 @@ export type ReceiptProvider = {
 };
 ```
 
-When adding OpenAI Vision later, create a server route such as `app/api/receipt/route.ts`, keep `OPENAI_API_KEY` server-only, and return the normalized `Receipt` shape. Do not expose provider secrets through `NEXT_PUBLIC_*`.
+When adding OpenAI Vision later, extend `app/api/receipt/route.ts`, keep `OPENAI_API_KEY` server-only, and return the normalized `Receipt` shape. Do not expose provider secrets through `NEXT_PUBLIC_*`.
 
 ## GitHub Setup
 
@@ -93,4 +95,4 @@ This project includes `.openai/hosting.json` and Vinext/Sites build tooling. Use
 
 ## Product Notes
 
-The MVP is client-first and does not persist receipts yet. Add persistence only after the core split flow feels right; likely next steps are receipt history, share links, payment app deep links, and a real OCR provider.
+The MVP now includes local receipt history persistence for quick restore on the same device. Next steps are share links, payment app deep links, and connecting the server OCR route to a production OCR provider.

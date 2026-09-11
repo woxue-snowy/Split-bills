@@ -68,8 +68,8 @@ export function createEmptyReceipt(memberIds: string[]): Receipt {
     items,
     tax: 3.72,
     serviceFee: 5.15,
-    tip: 6,
-    total: 66.37,
+    tip: 0,
+    total: 60.37,
   });
 }
 
